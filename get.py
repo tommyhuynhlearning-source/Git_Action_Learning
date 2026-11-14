@@ -4,12 +4,11 @@ import os
 from dotenv import load_dotenv
 
 load_dotenv()
-password = os.getenv('db_password')
-
+password = os.getenv("db_password")
 conn = None
 try:
     conn = mysql.connector.connect(
-        host='finace-data.clwue00u2hp5.ap-southeast-1.rds.amazonaws.com',
+        host='finance-data.clwue00u2hp5.ap-southeast-1.rds.amazonaws.com',
         port=3306,
         database='mydb',
         user='admin',
@@ -18,6 +17,7 @@ try:
         autocommit=True,
     ssl_ca='./global-bundle.pem'
     )
+    print("Connected to the database successfully!")
     cur = conn.cursor()
     cur.execute('SELECT VERSION();')
     print(cur.fetchone()[0])

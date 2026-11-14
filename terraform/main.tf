@@ -1,5 +1,5 @@
-resource "aws_db_instance" "finace_instance" {
-  identifier          = "finace-data"
+resource "aws_db_instance" "finance_instance" {
+  identifier          = "finance-data"
   allocated_storage   = 20
   engine              = "mysql"
   engine_version      = "8.0"
