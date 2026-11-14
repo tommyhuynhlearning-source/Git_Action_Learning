@@ -14,3 +14,7 @@ variable "db_password" {
 variable "instance_class" {
   default = "db.t3.micro"
 }
+variable "my_ip_cidr" {
+  type        = string
+  description = "Your public IP in CIDR notation, for example 203.0.113.25/32"
+}
