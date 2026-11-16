@@ -1,115 +1,129 @@
+"""
+Lấy giá mới nhất của cổ phiếu Mỹ (Finnhub /quote) rồi insert vào mydb.stock_quotes.
+
+Cách chạy:
+    python fetch_stock_quotes.py                 # dùng danh sách mặc định
+    python fetch_stock_quotes.py -s AAPL MSFT    # chọn symbol
+    python fetch_stock_quotes.py --dry-run       # chỉ in ra, không ghi DB
+
+.env cần có:
+    db_password=...
+    finnhub_api_key=...
+"""
 import argparse
-import csv
 import os
+import sys
+import time
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 import mysql.connector
+import requests
 from dotenv import load_dotenv
 
 load_dotenv()
-password = os.getenv("db_password")
 
 DB_CONFIG = dict(
     host="finance-data.clwue00u2hp5.ap-southeast-1.rds.amazonaws.com",
     port=3306,
     database="mydb",
     user="admin",
-    password=password,
+    password=os.getenv("db_password"),
     ssl_ca="./global-bundle.pem",
     ssl_disabled=False,
 )
 
-COLUMNS = (
-    "id, symbol, current_price, change_amount, percent_change, "
-    "high_price, low_price, open_price, prev_close, quote_time, fetched_at"
-)
+API_KEY = os.getenv("finnhub_api_key")
+QUOTE_URL = "https://finnhub.io/api/v1/quote"
+DEFAULT_SYMBOLS = ["AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META"]
+NY_TZ = ZoneInfo("America/New_York")
+
+INSERT_SQL = """
+    INSERT INTO stock_quotes
+        (symbol, current_price, change_amount, percent_change,
+         high_price, low_price, open_price, prev_close,
+         quote_time, quote_date, fetched_at)
+    VALUES
+        (%(symbol)s, %(current_price)s, %(change_amount)s, %(percent_change)s,
+         %(high_price)s, %(low_price)s, %(open_price)s, %(prev_close)s,
+         %(quote_time)s, %(quote_date)s, %(fetched_at)s)
+    ON DUPLICATE KEY UPDATE fetched_at = VALUES(fetched_at)
+"""
 
 
-def build_query(symbols, latest, limit):
-    """Return (sql, params) based on the CLI options."""
-    where = ""
-    params = []
-    if symbols:
-        placeholders = ", ".join(["%s"] * len(symbols))
-        where = f"WHERE symbol IN ({placeholders})"
-        params.extend(symbols)
+def fetch_quote(symbol):
+    """Gọi Finnhub, trả về dict khớp với các cột của bảng (hoặc None nếu lỗi)."""
+    try:
+        resp = requests.get(
+            QUOTE_URL, params={"symbol": symbol, "token": API_KEY}, timeout=10
+        )
+        resp.raise_for_status()
+        d = resp.json()
+    except requests.RequestException as e:
+        print(f"[{symbol}] lỗi gọi API: {e}")
+        return None
 
-    if latest:
-        # Most recent quote for each symbol
-        sql = f"""
-            SELECT {COLUMNS}
-            FROM stock_quotes q
-            JOIN (
-                SELECT symbol AS s, MAX(quote_time) AS max_time
-                FROM stock_quotes
-                {where}
-                GROUP BY symbol
-            ) m ON q.symbol = m.s AND q.quote_time = m.max_time
-            ORDER BY q.symbol
-        """
-    else:
-        sql = f"""
-            SELECT {COLUMNS}
-            FROM stock_quotes
-            {where}
-            ORDER BY quote_time DESC, symbol
-            LIMIT %s
-        """
-        params.append(limit)
+    # Symbol không tồn tại -> Finnhub trả về toàn số 0, t = 0
+    if not d.get("t") or d.get("c") in (None, 0):
+        print(f"[{symbol}] không có dữ liệu (sai symbol?)")
+        return None
 
-    return sql, params
-
-
-def print_table(rows):
-    if not rows:
-        print("No data found.")
-        return
-
-    headers = list(rows[0].keys())
-    widths = {h: max(len(h), *(len(str(r[h])) for r in rows)) for h in headers}
-
-    line = " | ".join(h.ljust(widths[h]) for h in headers)
-    print(line)
-    print("-+-".join("-" * widths[h] for h in headers))
-    for r in rows:
-        print(" | ".join(str(r[h]).ljust(widths[h]) for h in headers))
-    print(f"\n{len(rows)} row(s)")
-
-
-def save_csv(rows, path):
-    if not rows:
-        return
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=rows[0].keys())
-        writer.writeheader()
-        writer.writerows(rows)
-    print(f"Saved to {path}")
+    quote_dt_utc = datetime.fromtimestamp(d["t"], tz=timezone.utc)
+    return {
+        "symbol": symbol,
+        "current_price": d["c"],
+        "change_amount": d["d"],
+        "percent_change": d["dp"],
+        "high_price": d["h"],
+        "low_price": d["l"],
+        "open_price": d["o"],
+        "prev_close": d["pc"],
+        # quote_time lưu UTC; quote_date là ngày giao dịch theo giờ New York
+        "quote_time": quote_dt_utc.replace(tzinfo=None),
+        "quote_date": quote_dt_utc.astimezone(NY_TZ).date(),
+        "fetched_at": datetime.now(timezone.utc).replace(tzinfo=None),
+    }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Read data from stock_quotes")
+    parser = argparse.ArgumentParser(description="Fetch US stock quotes -> MySQL")
     parser.add_argument("-s", "--symbol", nargs="+", help="e.g. -s AAPL MSFT")
-    parser.add_argument("-n", "--limit", type=int, default=20,
-                        help="max rows (default 20, ignored with --latest)")
-    parser.add_argument("--latest", action="store_true",
-                        help="only the latest quote per symbol")
-    parser.add_argument("--csv", metavar="FILE", help="also export to a CSV file")
+    parser.add_argument("--dry-run", action="store_true", help="không ghi vào DB")
     args = parser.parse_args()
 
-    symbols = [s.upper() for s in args.symbol] if args.symbol else None
-    sql, params = build_query(symbols, args.latest, args.limit)
+    if not API_KEY:
+        sys.exit("Thiếu finnhub_api_key trong .env")
+
+    symbols = [s.upper() for s in (args.symbol or DEFAULT_SYMBOLS)]
+
+    rows = []
+    for sym in symbols:
+        row = fetch_quote(sym)
+        if row:
+            rows.append(row)
+            print(
+                f"[{sym}] {row['current_price']} "
+                f"({row['percent_change']:+.2f}%)  quote_time={row['quote_time']} UTC  "
+                f"quote_date={row['quote_date']}"
+            )
+        time.sleep(0.2)  # tránh vượt rate limit (free: 60 call/phút)
+
+    if not rows:
+        sys.exit("Không lấy được dữ liệu nào.")
+
+    if args.dry_run:
+        print(f"\nDry-run: bỏ qua insert {len(rows)} dòng.")
+        return
 
     conn = mysql.connector.connect(**DB_CONFIG)
     try:
-        cur = conn.cursor(dictionary=True)
-        cur.execute(sql, params)
-        rows = cur.fetchall()
+        cur = conn.cursor()
+        cur.executemany(INSERT_SQL, rows)
+        conn.commit()
         cur.close()
+        print(f"\nĐã ghi {len(rows)} dòng vào stock_quotes.")
     finally:
         conn.close()
-
-    print_table(rows)
-    if args.csv:
-        save_csv(rows, args.csv)
 
 
 if __name__ == "__main__":

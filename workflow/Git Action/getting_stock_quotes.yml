@@ -1,0 +1,27 @@
+name: getting_stock_quotes
+
+on:
+  schedule:
+    - cron: "0 13 * * *"    # 20h giờ Việt Nam
+  workflow_dispatch:
+
+jobs:
+  getting_stock_quotes:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run the script
+        run: python get.py
